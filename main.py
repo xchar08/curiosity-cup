@@ -8,16 +8,18 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 
-# Silence warnings from joblib and xgboost
+# Silence warnings from joblib and xgboost (set LOKY_MAX_CPU_COUNT to silence loky warning)
+os.environ["LOKY_MAX_CPU_COUNT"] = "8"
 warnings.filterwarnings("ignore", category=UserWarning, module="joblib")
-warnings.filterwarnings("ignore", category=UserWarning, module="xgboost")
+warnings.filterwarnings("ignore", message='Parameters: { "use_label_encoder" } are not used.', module="xgboost")
 
 from scipy.stats import shapiro
 from sklearn.preprocessing import LabelEncoder, RobustScaler, label_binarize
 from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_curve, auc
+from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix,
+                             roc_curve, auc, precision_recall_fscore_support)
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, StackingClassifier
 import xgboost as xgb
 from sklearn.multiclass import OneVsRestClassifier
 from imblearn.over_sampling import SMOTE
@@ -38,6 +40,7 @@ print("Testing set shape:", df_test.shape)
 # 2. Drop Extraneous Columns
 # -------------------------------
 def drop_unwanted_columns(df):
+    # Drop columns named 'id' or 'label' (any case)
     cols_to_drop = [col for col in df.columns if col.lower() in ['id', 'label']]
     return df.drop(columns=cols_to_drop)
 
@@ -59,7 +62,7 @@ for col in categorical_cols:
         le = LabelEncoder()
         df_test[col] = le.fit_transform(df_test[col].astype(str))
 
-# Process target "attack_cat"
+# Process the target "attack_cat"
 if 'attack_cat' in df_train.columns:
     df_train['attack_cat'] = df_train['attack_cat'].astype(str)
     le_target = LabelEncoder()
@@ -72,7 +75,7 @@ if 'attack_cat' in df_test.columns:
     df_test['attack_cat'] = le_target.transform(df_test['attack_cat'])
 
 # -------------------------------
-# 4. Scaling and Normality Checks (Training Set)
+# 4. Scaling and Normality Checks
 # -------------------------------
 numeric_cols = df_train.select_dtypes(include=[np.number]).columns.tolist()
 if 'attack_cat' in numeric_cols:
@@ -84,6 +87,7 @@ for col in numeric_cols:
     sample = data.sample(5000, random_state=42) if len(data) > 5000 else data
     stat, p = shapiro(sample)
     print(f" - {col}: p-value = {p:.4f}")
+# (Large samples often yield p-values ~0.0000)
 
 scaler = RobustScaler()
 df_train[numeric_cols] = scaler.fit_transform(df_train[numeric_cols])
@@ -121,7 +125,7 @@ print("Resampled training target distribution:")
 print(pd.Series(y_train_res).value_counts())
 
 # -------------------------------
-# 7. Hyperparameter Tuning (Example with RandomForest using GridSearchCV)
+# 7. Hyperparameter Tuning (Example with RandomForest)
 # -------------------------------
 param_grid = {
     'n_estimators': [100, 200],
@@ -136,12 +140,11 @@ print("\nBest parameters for RandomForest:", grid_rf.best_params_)
 best_rf = grid_rf.best_estimator_
 
 # -------------------------------
-# 8. Define and Train Classifiers
+# 8. Define and Train Base Classifiers
 # -------------------------------
 dt_clf  = DecisionTreeClassifier(random_state=42, class_weight='balanced')
-rf_clf  = best_rf
+rf_clf  = best_rf  # tuned from grid search
 et_clf  = ExtraTreesClassifier(random_state=42, n_estimators=100, class_weight='balanced')
-# For XGBoost, we try early stopping if supported.
 xgb_clf = xgb.XGBClassifier(random_state=42, use_label_encoder=False, eval_metric='mlogloss', n_estimators=200)
 
 models = {
@@ -151,11 +154,61 @@ models = {
     'XGBoost': xgb_clf
 }
 
+def evaluate_model(name, model, X_test, y_test, le_target):
+    print(f"\n--- Evaluating {name} ---")
+    y_pred = model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    print(f"{name} Accuracy: {acc:.4f}\n")
+    
+    # Get detailed per-class metrics
+    precision, recall, f1, support = precision_recall_fscore_support(y_test, y_pred)
+    results_df = pd.DataFrame({
+        "Class": le_target.inverse_transform(np.arange(len(precision))),
+        "Precision": precision,
+        "Recall": recall,
+        "F1-Score": f1,
+        "Support": support
+    })
+    print("Per-class Metrics:")
+    print(results_df.to_string(index=False, float_format="%.4f"))
+    
+    print("\nOverall Classification Report:")
+    print(classification_report(y_test, y_pred, target_names=le_target.classes_, digits=4, zero_division=0))
+    
+    cm = confusion_matrix(y_test, y_pred)
+    print("Confusion Matrix:")
+    print(cm)
+    plt.figure(figsize=(6,4))
+    sns.heatmap(cm, annot=True, fmt="d", cmap='Blues')
+    plt.title(f"{name} Confusion Matrix")
+    plt.xlabel("Predicted Label")
+    plt.ylabel("True Label")
+    plt.show()
+    
+    # Compute and print ROC AUC if possible
+    try:
+        y_test_bin = label_binarize(y_test, classes=np.arange(len(le_target.classes_)))
+        n_classes = y_test_bin.shape[1]
+        ovr = OneVsRestClassifier(model)
+        y_score = ovr.fit(X_train_res, y_train_res).predict_proba(X_test)
+        fpr = dict(); tpr = dict(); roc_auc = dict()
+        for i in range(n_classes):
+            fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
+            roc_auc[i] = auc(fpr[i], tpr[i])
+        fpr["micro"], tpr["micro"], _ = roc_curve(y_test_bin.ravel(), y_score.ravel())
+        roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
+        print("\nROC AUC (micro-average): {:.4f}".format(roc_auc["micro"]))
+        for i in range(n_classes):
+            print(f"Class {le_target.inverse_transform([i])[0]} ROC AUC: {roc_auc[i]:.4f}")
+    except Exception as e:
+        print("ROC AUC computation failed:", e)
+
+# Train and evaluate each model
 if y_test is not None:
     for name, model in models.items():
         print(f"\n--- Training {name} ---")
         if name == 'XGBoost':
-            # Split off 10% as validation for early stopping
+            # Split off 10% for validation for early stopping
             X_train_xgb, X_val, y_train_xgb, y_val = train_test_split(X_train_res, y_train_res, test_size=0.1, stratify=y_train_res, random_state=42)
             try:
                 model.fit(X_train_xgb, y_train_xgb, early_stopping_rounds=10, eval_set=[(X_val, y_val)], verbose=False)
@@ -165,25 +218,48 @@ if y_test is not None:
         else:
             model.fit(X_train_res, y_train_res)
         
-        y_pred = model.predict(X_test)
-        acc = accuracy_score(y_test, y_pred)
-        print(f"{name} Accuracy: {acc:.4f}")
-        print("Classification Report:")
-        print(classification_report(y_test, y_pred, target_names=le_target.classes_, digits=4, zero_division=0))
-    
-        # Plot confusion matrix
-        cm = confusion_matrix(y_test, y_pred)
-        plt.figure(figsize=(6,4))
-        sns.heatmap(cm, annot=True, fmt="d", cmap='Blues')
-        plt.title(f"{name} Confusion Matrix")
-        plt.xlabel("Predicted Label")
-        plt.ylabel("True Label")
-        plt.show()
+        evaluate_model(name, model, X_test, y_test, le_target)
 else:
     print("No target labels found in test set. Consider using cross-validation for evaluation.")
 
 # -------------------------------
-# 9. Multi-Class ROC Curve (Optional)
+# 9. Define and Train a Stacking Ensemble for Further Accuracy
+# -------------------------------
+from sklearn.ensemble import StackingClassifier
+
+estimators = [
+    ('dt', dt_clf),
+    ('rf', rf_clf),
+    ('et', et_clf),
+    ('xgb', xgb_clf)
+]
+
+stacking_clf = StackingClassifier(
+    estimators=estimators,
+    final_estimator=RandomForestClassifier(random_state=42, n_estimators=100, class_weight='balanced'),
+    cv=cv,
+    n_jobs=-1,
+    passthrough=False
+)
+stacking_clf.fit(X_train_res, y_train_res)
+print("\n--- Evaluating Stacking Classifier ---")
+y_pred_stack = stacking_clf.predict(X_test)
+acc_stack = accuracy_score(y_test, y_pred_stack)
+print(f"Stacking Classifier Accuracy: {acc_stack:.4f}\n")
+print("Stacking Classifier Detailed Report:")
+print(classification_report(y_test, y_pred_stack, target_names=le_target.classes_, digits=4, zero_division=0))
+cm_stack = confusion_matrix(y_test, y_pred_stack)
+print("Stacking Classifier Confusion Matrix:")
+print(cm_stack)
+plt.figure(figsize=(6,4))
+sns.heatmap(cm_stack, annot=True, fmt="d", cmap='Blues')
+plt.title("Stacking Classifier Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+# -------------------------------
+# 10. Multi-Class ROC Curve for Random Forest (Optional)
 # -------------------------------
 if y_test is not None:
     from sklearn.preprocessing import label_binarize
@@ -193,13 +269,10 @@ if y_test is not None:
     ovr_rf = OneVsRestClassifier(rf_clf)
     y_score = ovr_rf.fit(X_train_res, y_train_res).predict_proba(X_test)
 
-    fpr = dict()
-    tpr = dict()
-    roc_auc = dict()
+    fpr = dict(); tpr = dict(); roc_auc = dict()
     for i in range(n_classes):
         fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
         roc_auc[i] = auc(fpr[i], tpr[i])
-
     fpr["micro"], tpr["micro"], _ = roc_curve(y_test_bin.ravel(), y_score.ravel())
     roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
 

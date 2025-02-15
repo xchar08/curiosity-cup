@@ -144,7 +144,15 @@ best_rf = grid_rf.best_estimator_
 dt_clf  = DecisionTreeClassifier(random_state=42, class_weight='balanced')
 rf_clf  = best_rf  # tuned RandomForest
 et_clf  = ExtraTreesClassifier(random_state=42, n_estimators=100, class_weight='balanced')
-xgb_clf = xgb.XGBClassifier(random_state=42, use_label_encoder=False, eval_metric='mlogloss', n_estimators=200)
+# --- XGBoost now uses GPU acceleration ---
+xgb_clf = xgb.XGBClassifier(
+    random_state=42,
+    use_label_encoder=False,
+    eval_metric='mlogloss',
+    n_estimators=200,
+    tree_method='gpu_hist',      # Use GPU accelerated histogram-based algorithm
+    predictor='gpu_predictor'    # Use GPU for prediction
+)
 
 models = {
     'Decision Tree': dt_clf,

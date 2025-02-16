@@ -1,9 +1,9 @@
 pandas
 numpy
 matplotlib
-seaborn
-scipy
 scikit-learn
+imbalanced-learn
 xgboost
-kaggle
-imblearn
+pyshark
+joblib
+scipy

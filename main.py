@@ -16,7 +16,8 @@ warnings.filterwarnings("ignore", message='Parameters: { "use_label_encoder" } a
 from scipy.stats import shapiro
 from sklearn.preprocessing import LabelEncoder, RobustScaler, label_binarize
 from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_curve, auc, precision_recall_fscore_support
+from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix, roc_curve, auc, 
+                             precision_recall_fscore_support, f1_score)
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, StackingClassifier
 import xgboost as xgb
@@ -144,13 +145,13 @@ best_rf = grid_rf.best_estimator_
 dt_clf  = DecisionTreeClassifier(random_state=42, class_weight='balanced')
 rf_clf  = best_rf  # tuned RandomForest
 et_clf  = ExtraTreesClassifier(random_state=42, n_estimators=100, class_weight='balanced')
-# --- XGBoost now uses GPU acceleration ---
+# XGBoost with GPU acceleration
 xgb_clf = xgb.XGBClassifier(
     random_state=42,
     use_label_encoder=False,
     eval_metric='mlogloss',
     n_estimators=200,
-    tree_method='gpu_hist',      # Use GPU accelerated histogram-based algorithm
+    tree_method='gpu_hist',      # Use GPU accelerated histogram algorithm
     predictor='gpu_predictor'    # Use GPU for prediction
 )
 
@@ -162,6 +163,10 @@ models = {
 }
 
 def evaluate_model(name, model, X_test, y_test, le_target, X_train_res, y_train_res):
+    """
+    Evaluates the model on X_test/y_test, prints classification metrics, plots
+    confusion matrix and ROC curves, and returns the weighted F1 score.
+    """
     print(f"\n--- Evaluating {name} ---")
     y_pred = model.predict(X_test)
     acc = accuracy_score(y_test, y_pred)
@@ -192,32 +197,56 @@ def evaluate_model(name, model, X_test, y_test, le_target, X_train_res, y_train_
     plt.ylabel("True Label")
     plt.show()
     
-    # Compute ROC AUC if possible
+    # --- ROC AUC computation with NaN handling ---
     try:
+        # Fill missing values if any in the feature sets
+        X_test_filled = X_test.fillna(0)
+        X_train_res_filled = X_train_res.fillna(0)
+        
+        # Binarize the test labels
         y_test_bin = label_binarize(y_test, classes=np.arange(len(le_target.classes_)))
         n_classes = y_test_bin.shape[1]
+        
+        # Use OneVsRestClassifier to obtain probability estimates
         ovr = OneVsRestClassifier(model)
-        # Use the resampled training data to refit the classifier for probability estimation
-        y_score = ovr.fit(X_train_res, y_train_res).predict_proba(X_test)
-        fpr = dict(); tpr = dict(); roc_auc = dict()
-        for i in range(n_classes):
-            fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
-            roc_auc[i] = auc(fpr[i], tpr[i])
-        fpr["micro"], tpr["micro"], _ = roc_curve(y_test_bin.ravel(), y_score.ravel())
-        roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
-        print("\nROC AUC (micro-average): {:.4f}".format(roc_auc["micro"]))
-        for i in range(n_classes):
-            print(f"Class {le_target.inverse_transform([i])[0]} ROC AUC: {roc_auc[i]:.4f}")
+        y_score = ovr.fit(X_train_res_filled, y_train_res).predict_proba(X_test_filled)
+        
+        # Check if any NaN values exist in the predicted probabilities
+        if np.isnan(y_score).any():
+            print("Predicted probabilities contain NaN values. Skipping ROC AUC computation.")
+        else:
+            fpr = dict()
+            tpr = dict()
+            roc_auc = dict()
+            for i in range(n_classes):
+                fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
+                roc_auc[i] = auc(fpr[i], tpr[i])
+            fpr["micro"], tpr["micro"], _ = roc_curve(y_test_bin.ravel(), y_score.ravel())
+            roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
+            print("\nROC AUC (micro-average): {:.4f}".format(roc_auc["micro"]))
+            for i in range(n_classes):
+                print(f"Class {le_target.inverse_transform([i])[0]} ROC AUC: {roc_auc[i]:.4f}")
     except Exception as e:
         print("ROC AUC computation failed:", e)
+    
+    # Compute weighted F1 score for model selection
+    weighted_f1 = f1_score(y_test, y_pred, average='weighted')
+    print(f"{name} Weighted F1 Score: {weighted_f1:.4f}\n")
+    return weighted_f1
 
-# Train and evaluate each base model
+# -------------------------------
+# 8a. Train and Evaluate Base Models, and Record Their Scores
+# -------------------------------
+model_scores = {}  # to store weighted F1 scores for model selection
+
 if y_test is not None:
     for name, model in models.items():
         print(f"\n--- Training {name} ---")
         if name == 'XGBoost':
             # Split off 10% for validation for early stopping
-            X_train_xgb, X_val, y_train_xgb, y_val = train_test_split(X_train_res, y_train_res, test_size=0.1, stratify=y_train_res, random_state=42)
+            X_train_xgb, X_val, y_train_xgb, y_val = train_test_split(
+                X_train_res, y_train_res, test_size=0.1, stratify=y_train_res, random_state=42
+            )
             try:
                 model.fit(X_train_xgb, y_train_xgb, early_stopping_rounds=10, eval_set=[(X_val, y_val)], verbose=False)
             except TypeError:
@@ -226,15 +255,25 @@ if y_test is not None:
         else:
             model.fit(X_train_res, y_train_res)
         
-        evaluate_model(name, model, X_test, y_test, le_target, X_train_res, y_train_res)
+        # Evaluate the model and record its weighted F1 score
+        score = evaluate_model(name, model, X_test, y_test, le_target, X_train_res, y_train_res)
+        model_scores[name] = score
 else:
     print("No target labels found in test set. Consider using cross-validation for evaluation.")
 
 # -------------------------------
+# 8b. Output the Best Model Based on Weighted F1 Score
+# -------------------------------
+if model_scores:
+    best_model_name = max(model_scores, key=model_scores.get)
+    best_model_score = model_scores[best_model_name]
+    print("\n==============================")
+    print(f"Best Model: {best_model_name} with a Weighted F1 Score of {best_model_score:.4f}")
+    print("==============================\n")
+
+# -------------------------------
 # 9. Train a Stacking Ensemble for Further Accuracy
 # -------------------------------
-from sklearn.ensemble import StackingClassifier
-
 estimators = [
     ('dt', dt_clf),
     ('rf', rf_clf),
@@ -270,14 +309,15 @@ plt.show()
 # 10. Multi-Class ROC Curve for RandomForest (Optional)
 # -------------------------------
 if y_test is not None:
-    from sklearn.preprocessing import label_binarize
     y_test_bin = label_binarize(y_test, classes=np.arange(len(le_target.classes_)))
     n_classes = y_test_bin.shape[1]
 
     ovr_rf = OneVsRestClassifier(rf_clf)
     y_score = ovr_rf.fit(X_train_res, y_train_res).predict_proba(X_test)
 
-    fpr = dict(); tpr = dict(); roc_auc = dict()
+    fpr = dict()
+    tpr = dict()
+    roc_auc = dict()
     for i in range(n_classes):
         fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
         roc_auc[i] = auc(fpr[i], tpr[i])
@@ -296,3 +336,8 @@ if y_test is not None:
     plt.title('Random Forest - Multi-Class ROC Curve')
     plt.legend(loc="lower right")
     plt.show()
+
+# -------------------------------
+# Final Output: Ensure All Charts are Shown
+# -------------------------------
+plt.show()  # In case any pending figures remain

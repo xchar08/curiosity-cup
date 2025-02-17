@@ -156,12 +156,11 @@ def train_pipeline(train_file, test_file):
     dt_clf  = DecisionTreeClassifier(random_state=42, class_weight='balanced')
     rf_clf  = best_rf  # tuned RandomForest
     et_clf  = ExtraTreesClassifier(random_state=42, n_estimators=100, class_weight='balanced')
-    # XGBoost with CPU settings to avoid deprecated GPU warnings
     xgb_clf = xgb.XGBClassifier(
         random_state=42,
         eval_metric='mlogloss',
         n_estimators=200,
-        tree_method='hist'  # Use CPU hist method
+        tree_method='hist'
     )
 
     models = {
@@ -172,16 +171,11 @@ def train_pipeline(train_file, test_file):
     }
 
     def evaluate_model(name, model, X_test, y_test, le_target, X_train_res, y_train_res):
-        """
-        Evaluates the model on X_test/y_test, prints classification metrics, plots
-        confusion matrix and ROC curves, and returns the weighted F1 score.
-        """
         print(f"\n--- Evaluating {name} ---")
         y_pred = model.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
         print(f"{name} Accuracy: {acc:.4f}\n")
         
-        # Detailed per-class metrics
         precision, recall, f1, support = precision_recall_fscore_support(y_test, y_pred, zero_division=0)
         results_df = pd.DataFrame({
             "Class": le_target.inverse_transform(np.arange(len(precision))),
@@ -206,7 +200,6 @@ def train_pipeline(train_file, test_file):
         plt.ylabel("True Label")
         plt.show()
         
-        # --- ROC AUC computation with NaN handling ---
         try:
             X_test_filled = X_test.fillna(0)
             X_train_res_filled = X_train_res.fillna(0)
@@ -238,9 +231,7 @@ def train_pipeline(train_file, test_file):
         print(f"{name} Weighted F1 Score: {weighted_f1:.4f}\n")
         return weighted_f1
 
-    # 8a. Train and Evaluate Base Models, and Record Their Scores
     model_scores = {}
-
     if y_test is not None:
         for name, model in models.items():
             print(f"\n--- Training {name} ---")
@@ -255,7 +246,6 @@ def train_pipeline(train_file, test_file):
                     model.fit(X_train_xgb, y_train_xgb)
             else:
                 model.fit(X_train_res, y_train_res)
-            
             score = evaluate_model(name, model, X_test, y_test, le_target, X_train_res, y_train_res)
             model_scores[name] = score
     else:
@@ -270,7 +260,6 @@ def train_pipeline(train_file, test_file):
     else:
         best_model_name = None
 
-    # 9. Train a Stacking Ensemble for Further Accuracy
     estimators = [
         ('dt', dt_clf),
         ('rf', rf_clf),
@@ -352,15 +341,30 @@ def live_ddos_detection(model, interface, capture_duration, scaler, port=None, i
         print("No packets captured.")
         return False, []
 
+    print("[DEBUG] Captured IP counts:", ip_count)
+    total_packets = len(feature_list)
+    print(f"[DEBUG] Total packets captured: {total_packets}")
+
     df_features = pd.DataFrame(feature_list)
-    numeric_cols = df_features.select_dtypes(include=[np.number]).columns.tolist()
-    if numeric_cols and scaler:
-        df_features[numeric_cols] = scaler.transform(df_features[numeric_cols])
-    
-    predictions = model.predict(df_features)
+    # Create a DataFrame with expected numeric columns using the scaler's feature_names_in_
+    try:
+        expected_cols = scaler.feature_names_in_
+    except AttributeError:
+        expected_cols = df_features.columns
+    df_full = pd.DataFrame(0, index=df_features.index, columns=expected_cols)
+    for col in df_features.columns:
+        if col in expected_cols:
+            df_full[col] = df_features[col]
+    try:
+        df_features_scaled = scaler.transform(df_full)
+    except Exception as e:
+        print("Error during scaling:", e)
+        df_features_scaled = df_full.values  # fallback: use raw values
+
+    predictions = model.predict(df_features_scaled)
     ddos_ml_count = (predictions == 1).sum()  # assuming class "1" indicates DDoS-like traffic
-    total_packets = len(predictions)
-    print(f"[*] Processed {total_packets} packets; {ddos_ml_count} flagged as potential DDoS by ML model.")
+    print(f"[DEBUG] Total packets processed by ML model: {len(predictions)}")
+    print(f"[DEBUG] Number of packets flagged as potential DDoS by ML model: {ddos_ml_count}")
 
     suspicious_ips = [ip for ip, count in ip_count.items() if count > ip_threshold]
     if suspicious_ips:
@@ -397,7 +401,7 @@ def main():
     parser.add_argument('--train_file', type=str, default="UNSW_NB15_training-set.csv", help="Training CSV file path")
     parser.add_argument('--test_file', type=str, default="UNSW_NB15_testing-set.csv", help="Testing CSV file path")
     parser.add_argument('--ddos_mode', choices=['detection', 'prevention'], help="In monitor mode, choose 'detection' or 'prevention'")
-    parser.add_argument('--interface', type=str, help="Network interface to capture traffic (e.g., eth0)")
+    parser.add_argument('--interface', type=str, help="Network interface to capture traffic (e.g., eth0 or Wi-Fi)")
     parser.add_argument('--duration', type=int, default=30, help="Capture duration in seconds for live monitoring")
     parser.add_argument('--port', type=int, help="Optional port number to filter captured traffic")
     parser.add_argument('--ip_threshold', type=int, default=100, help="Packet count threshold per IP to flag as suspicious")

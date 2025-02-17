@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 import pyshark  # For live packet capture; ensure it's installed (pip install pyshark)
+import platform
 
 # Silence warnings from joblib and xgboost (as much as possible)
 os.environ["LOKY_MAX_CPU_COUNT"] = "8"
@@ -28,6 +29,27 @@ import xgboost as xgb
 from sklearn.multiclass import OneVsRestClassifier
 from imblearn.over_sampling import SMOTE
 from joblib import dump, load
+
+# -------------------------------
+# Helper function for cross-platform IP blocking
+# -------------------------------
+def block_ip(ip):
+    os_type = platform.system().lower()
+    if os_type == 'windows':
+        # Use Windows Firewall via netsh
+        cmd = [
+            "netsh", "advfirewall", "firewall", "add", "rule",
+            f"name=Block_{ip}", "protocol=TCP", "dir=in", f"remoteip={ip}",
+            "action=block"
+        ]
+    else:
+        # Use iptables on Linux
+        cmd = ["sudo", "iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"]
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"[ALERT] Successfully blocked IP {ip}.")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Failed to block IP {ip}: {e}")
 
 # -------------------------------
 # FUNCTIONS FOR TRAINING PIPELINE
@@ -189,7 +211,6 @@ def train_pipeline(train_file, test_file):
             X_test_filled = X_test.fillna(0)
             X_train_res_filled = X_train_res.fillna(0)
             y_test_bin = label_binarize(y_test, classes=np.arange(len(le_target.classes_)))
-            # Check if each class has at least one instance
             if y_test_bin.shape[1] < 2 or np.any(np.sum(y_test_bin, axis=0) == 0):
                 print("Not all classes are represented in y_test. Skipping ROC AUC computation.")
             else:
@@ -218,7 +239,7 @@ def train_pipeline(train_file, test_file):
         return weighted_f1
 
     # 8a. Train and Evaluate Base Models, and Record Their Scores
-    model_scores = {}  # to store weighted F1 scores
+    model_scores = {}
 
     if y_test is not None:
         for name, model in models.items():
@@ -280,7 +301,6 @@ def train_pipeline(train_file, test_file):
     plt.ylabel("True Label")
     plt.show()
 
-    # Save the stacking classifier and scaler for live detection/prevention use
     dump(stacking_clf, "trained_stacking_model.pkl")
     dump(scaler, "trained_scaler.pkl")
     print("[INFO] Trained stacking model saved as 'trained_stacking_model.pkl'.")
@@ -333,23 +353,19 @@ def live_ddos_detection(model, interface, capture_duration, scaler, port=None, i
         return False, []
 
     df_features = pd.DataFrame(feature_list)
-    # Scale numeric features using the pre-fitted scaler (if available)
     numeric_cols = df_features.select_dtypes(include=[np.number]).columns.tolist()
     if numeric_cols and scaler:
         df_features[numeric_cols] = scaler.transform(df_features[numeric_cols])
     
-    # Use the ML model to predict for each packet
     predictions = model.predict(df_features)
     ddos_ml_count = (predictions == 1).sum()  # assuming class "1" indicates DDoS-like traffic
     total_packets = len(predictions)
     print(f"[*] Processed {total_packets} packets; {ddos_ml_count} flagged as potential DDoS by ML model.")
 
-    # Check for any IP exceeding the threshold
     suspicious_ips = [ip for ip, count in ip_count.items() if count > ip_threshold]
     if suspicious_ips:
         print(f"[*] Heuristic detection: The following IP(s) sent more than {ip_threshold} packets: {suspicious_ips}")
 
-    # Combine ML and heuristic logic: flag if either more than 50% of packets are flagged OR any IP exceeds the threshold.
     if (total_packets > 0 and (ddos_ml_count / total_packets) > 0.5) or suspicious_ips:
         print("[ALERT] Potential DDoS attack detected!")
         return True, suspicious_ips
@@ -365,14 +381,7 @@ def live_ddos_prevention(model, interface, capture_duration, scaler, port=None, 
     if detected and suspicious_ips:
         print("[*] Initiating prevention measures...")
         for ip in suspicious_ips:
-            try:
-                subprocess.run(
-                    ["sudo", "iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"],
-                    check=True
-                )
-                print(f"[ALERT] Added iptables rule to drop packets from {ip}.")
-            except subprocess.CalledProcessError as e:
-                print(f"[ERROR] Failed to add iptables rule for {ip}: {e}")
+            block_ip(ip)
     elif detected:
         print("[ALERT] DDoS attack detected by ML model but no specific IP identified for blocking.")
     else:
@@ -385,33 +394,26 @@ def main():
     parser = argparse.ArgumentParser(description="Network Security ML Pipeline: Train model or monitor live traffic for DDoS")
     parser.add_argument('--action', choices=['train', 'monitor'], default='train',
                         help="Action to perform: 'train' to run the training pipeline, 'monitor' to run live traffic monitoring.")
-    # Training files (used when action == 'train')
     parser.add_argument('--train_file', type=str, default="UNSW_NB15_training-set.csv", help="Training CSV file path")
     parser.add_argument('--test_file', type=str, default="UNSW_NB15_testing-set.csv", help="Testing CSV file path")
-    # Live monitoring arguments (used when action == 'monitor')
     parser.add_argument('--ddos_mode', choices=['detection', 'prevention'], help="In monitor mode, choose 'detection' or 'prevention'")
     parser.add_argument('--interface', type=str, help="Network interface to capture traffic (e.g., eth0)")
     parser.add_argument('--duration', type=int, default=30, help="Capture duration in seconds for live monitoring")
     parser.add_argument('--port', type=int, help="Optional port number to filter captured traffic")
-    # Optionally set a threshold for suspicious packet counts per IP
     parser.add_argument('--ip_threshold', type=int, default=100, help="Packet count threshold per IP to flag as suspicious")
-    # Allow specifying model and scaler files
     parser.add_argument('--model_file', type=str, default="trained_stacking_model.pkl", help="Path to the trained model file")
     parser.add_argument('--scaler_file', type=str, default="trained_scaler.pkl", help="Path to the trained scaler file")
     args = parser.parse_args()
 
     if args.action == 'train':
-        # Run the training pipeline
         model, le_target, scaler = train_pipeline(args.train_file, args.test_file)
     elif args.action == 'monitor':
-        # In monitor mode, load the saved model and scaler (trained previously)
         try:
             model = load(args.model_file)
             scaler = load(args.scaler_file)
         except Exception as e:
             print(f"[ERROR] Could not load trained model or scaler: {e}")
             sys.exit(1)
-        # Ensure required live mode arguments are provided
         if not args.interface or not args.ddos_mode:
             print("[ERROR] In monitor mode, both --interface and --ddos_mode must be specified.")
             sys.exit(1)

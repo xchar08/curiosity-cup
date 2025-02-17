@@ -13,10 +13,9 @@ import seaborn as sns
 import warnings
 import pyshark  # For live packet capture; ensure it's installed (pip install pyshark)
 
-# Silence warnings from joblib and xgboost
+# Silence warnings from joblib and xgboost (as much as possible)
 os.environ["LOKY_MAX_CPU_COUNT"] = "8"
 warnings.filterwarnings("ignore", category=UserWarning, module="joblib")
-warnings.filterwarnings("ignore", message='Parameters: { "use_label_encoder" } are not used.', module="xgboost")
 
 from scipy.stats import shapiro
 from sklearn.preprocessing import LabelEncoder, RobustScaler, label_binarize
@@ -135,14 +134,12 @@ def train_pipeline(train_file, test_file):
     dt_clf  = DecisionTreeClassifier(random_state=42, class_weight='balanced')
     rf_clf  = best_rf  # tuned RandomForest
     et_clf  = ExtraTreesClassifier(random_state=42, n_estimators=100, class_weight='balanced')
-    # XGBoost with GPU acceleration (adjust if GPU is not available)
+    # XGBoost with CPU settings to avoid deprecated GPU warnings
     xgb_clf = xgb.XGBClassifier(
         random_state=42,
-        use_label_encoder=False,
         eval_metric='mlogloss',
         n_estimators=200,
-        tree_method='gpu_hist',      # Use GPU accelerated histogram algorithm
-        predictor='gpu_predictor'    # Use GPU for prediction
+        tree_method='hist'  # Use CPU hist method
     )
 
     models = {
@@ -192,23 +189,27 @@ def train_pipeline(train_file, test_file):
             X_test_filled = X_test.fillna(0)
             X_train_res_filled = X_train_res.fillna(0)
             y_test_bin = label_binarize(y_test, classes=np.arange(len(le_target.classes_)))
-            n_classes = y_test_bin.shape[1]
-            ovr = OneVsRestClassifier(model)
-            y_score = ovr.fit(X_train_res_filled, y_train_res).predict_proba(X_test_filled)
-            if np.isnan(y_score).any():
-                print("Predicted probabilities contain NaN values. Skipping ROC AUC computation.")
+            # Check if each class has at least one instance
+            if y_test_bin.shape[1] < 2 or np.any(np.sum(y_test_bin, axis=0) == 0):
+                print("Not all classes are represented in y_test. Skipping ROC AUC computation.")
             else:
-                fpr = dict()
-                tpr = dict()
-                roc_auc = dict()
-                for i in range(n_classes):
-                    fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
-                    roc_auc[i] = auc(fpr[i], tpr[i])
-                fpr["micro"], tpr["micro"], _ = roc_curve(y_test_bin.ravel(), y_score.ravel())
-                roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
-                print("\nROC AUC (micro-average): {:.4f}".format(roc_auc["micro"]))
-                for i in range(n_classes):
-                    print(f"Class {le_target.inverse_transform([i])[0]} ROC AUC: {roc_auc[i]:.4f}")
+                n_classes = y_test_bin.shape[1]
+                ovr = OneVsRestClassifier(model)
+                y_score = ovr.fit(X_train_res_filled, y_train_res).predict_proba(X_test_filled)
+                if np.isnan(y_score).any():
+                    print("Predicted probabilities contain NaN values. Skipping ROC AUC computation.")
+                else:
+                    fpr = dict()
+                    tpr = dict()
+                    roc_auc = dict()
+                    for i in range(n_classes):
+                        fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
+                        roc_auc[i] = auc(fpr[i], tpr[i])
+                    fpr["micro"], tpr["micro"], _ = roc_curve(y_test_bin.ravel(), y_score.ravel())
+                    roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
+                    print("\nROC AUC (micro-average): {:.4f}".format(roc_auc["micro"]))
+                    for i in range(n_classes):
+                        print(f"Class {le_target.inverse_transform([i])[0]} ROC AUC: {roc_auc[i]:.4f}")
         except Exception as e:
             print("ROC AUC computation failed:", e)
         
@@ -329,7 +330,7 @@ def live_ddos_detection(model, interface, capture_duration, scaler, port=None, i
 
     if not feature_list:
         print("No packets captured.")
-        return False
+        return False, []
 
     df_features = pd.DataFrame(feature_list)
     # Scale numeric features using the pre-fitted scaler (if available)
@@ -394,6 +395,9 @@ def main():
     parser.add_argument('--port', type=int, help="Optional port number to filter captured traffic")
     # Optionally set a threshold for suspicious packet counts per IP
     parser.add_argument('--ip_threshold', type=int, default=100, help="Packet count threshold per IP to flag as suspicious")
+    # Allow specifying model and scaler files
+    parser.add_argument('--model_file', type=str, default="trained_stacking_model.pkl", help="Path to the trained model file")
+    parser.add_argument('--scaler_file', type=str, default="trained_scaler.pkl", help="Path to the trained scaler file")
     args = parser.parse_args()
 
     if args.action == 'train':
@@ -402,8 +406,8 @@ def main():
     elif args.action == 'monitor':
         # In monitor mode, load the saved model and scaler (trained previously)
         try:
-            model = load("trained_stacking_model.pkl")
-            scaler = load("trained_scaler.pkl")
+            model = load(args.model_file)
+            scaler = load(args.scaler_file)
         except Exception as e:
             print(f"[ERROR] Could not load trained model or scaler: {e}")
             sys.exit(1)

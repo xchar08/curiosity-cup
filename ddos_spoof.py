@@ -2,7 +2,7 @@ from scapy.all import IP, TCP, send
 import time
 
 # Set target and spoofed source IPs (adjust these for your lab environment)
-target_ip = "localhost"  # Replace with your HTTP server's IP (your Wi-Fi IP)
+target_ip = "10.232.171.229"  # Replace with your HTTP server's IP (your Wi-Fi IP)
 target_port = 8000           # The port on which your HTTP server is running
 spoofed_ip = "10.0.0.143"      # An arbitrary spoofed IP (lab only)
 

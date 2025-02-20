@@ -1,10 +1,13 @@
 pandas
 numpy
 matplotlib
-scikit-learn
-imbalanced-learn
-xgboost
+seaborn
 pyshark
+scikit-learn
+xgboost
+imbalanced-learn
 joblib
 scipy
+tensorflow
+keras-metrics
 scapy

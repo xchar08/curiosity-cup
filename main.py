@@ -354,63 +354,73 @@ def extract_features(packet):
         features['src_ip'] = "0.0.0.0"
     return features
 
-def live_ddos_detection(model, interface, capture_duration, scaler, port=None, ip_threshold=100):
+def live_ddos_detection(model, interface, capture_duration, scaler, port=None, ddos_threshold=0.5):
     print("[*] Starting live DDoS detection mode on interface:", interface)
     display_filter = f"tcp.port == {port}" if port is not None else None
     capture = pyshark.LiveCapture(interface=interface, display_filter=display_filter)
     start_time = time.time()
+    
     feature_list = []
-    ip_count = {}
+    ip_list = []  # to track source IPs for each packet
+    
     for packet in capture.sniff_continuously():
         if time.time() - start_time > capture_duration:
             break
         feat = extract_features(packet)
         feature_list.append(feat)
-        src_ip = feat.get('src_ip')
-        if src_ip:
-            ip_count[src_ip] = ip_count.get(src_ip, 0) + 1
+        ip_list.append(feat.get('src_ip', "0.0.0.0"))
+    
     if not feature_list:
         print("No packets captured.")
         return False, []
-    print("[DEBUG] Captured IP counts:", ip_count)
-    total_packets = len(feature_list)
-    print(f"[DEBUG] Total packets captured: {total_packets}")
-    df_features = pd.DataFrame(feature_list)
+    
+    print("[DEBUG] Total packets captured:", len(feature_list))
+    
     # Load expected feature names.
     try:
         expected_cols = load("trained_feature_names.pkl")
     except Exception as e:
         print("Error loading trained feature names:", e)
-        expected_cols = df_features.columns
-    # Build a DataFrame with all expected columns, filling missing ones with 0.
-    df_full = pd.DataFrame(0, index=df_features.index, columns=expected_cols)
-    for col in df_features.columns:
-        if col in expected_cols:
-            df_full[col] = df_features[col]
-    # Debug: print shape of df_full.
-    print("[DEBUG] Live feature DataFrame shape (before scaling):", df_full.shape)
+        expected_cols = list(feature_list[0].keys())
+    
+    # Build a DataFrame using only the expected features.
+    df_features = pd.DataFrame(feature_list)
+    df_features = df_features[[col for col in expected_cols if col in df_features.columns]]
+    
+    # Ensure all expected columns are present.
+    for col in expected_cols:
+        if col not in df_features.columns:
+            df_features[col] = 0
+    
+    print("[DEBUG] Live feature DataFrame shape (before scaling):", df_features.shape)
     try:
-        df_features_scaled = scaler.transform(df_full)
+        df_features_scaled = scaler.transform(df_features)
     except Exception as e:
         print("Error during scaling:", e)
-        df_features_scaled = df_full.values
-    # Predict using the model.
+        df_features_scaled = df_features.values
+    
+    # Predict using the trained model.
     predictions = model.predict(df_features_scaled)
-    ddos_ml_count = (predictions == 1).sum()  # adjust if class "1" means DDoS in your encoding.
-    print(f"[DEBUG] Total packets processed by ML model: {len(predictions)}")
-    print(f"[DEBUG] Number of packets flagged as potential DDoS by ML model: {ddos_ml_count}")
-    suspicious_ips = [ip for ip, count in ip_count.items() if count > ip_threshold]
+    
+    # Map each packet's source IP to its prediction.
+    df_preds = pd.DataFrame({'src_ip': ip_list, 'prediction': predictions})
+    # Group by IP to compute the average prediction (1 indicates DDoS).
+    ip_group = df_preds.groupby('src_ip')['prediction'].agg(['mean', 'count']).reset_index()
+    print("[DEBUG] IP grouping based on model predictions:")
+    print(ip_group)
+    
+    # Identify suspicious IPs based on ddos_threshold.
+    suspicious_ips = ip_group[ip_group['mean'] >= ddos_threshold]['src_ip'].tolist()
+    
     if suspicious_ips:
-        print(f"[*] Heuristic detection: The following IP(s) sent more than {ip_threshold} packets: {suspicious_ips}")
-    if (total_packets > 0 and (ddos_ml_count / total_packets) > 0.5) or suspicious_ips:
-        print("[ALERT] Potential DDoS attack detected!")
+        print("[ALERT] Potential DDoS attack detected from IP(s):", suspicious_ips)
         return True, suspicious_ips
     else:
         print("[INFO] Traffic appears normal.")
         return False, []
 
-def live_ddos_prevention(model, interface, capture_duration, scaler, port=None, ip_threshold=100):
-    detected, suspicious_ips = live_ddos_detection(model, interface, capture_duration, scaler, port, ip_threshold)
+def live_ddos_prevention(model, interface, capture_duration, scaler, port=None, ddos_threshold=0.5):
+    detected, suspicious_ips = live_ddos_detection(model, interface, capture_duration, scaler, port, ddos_threshold)
     if detected and suspicious_ips:
         print("[*] Initiating prevention measures...")
         for ip in suspicious_ips:
@@ -433,7 +443,7 @@ def main():
     parser.add_argument('--interface', type=str, help="Network interface for capturing traffic (e.g., eth0 or Wi-Fi)")
     parser.add_argument('--duration', type=int, default=30, help="Capture duration (seconds) for live monitoring")
     parser.add_argument('--port', type=int, help="Optional port number for traffic filtering")
-    parser.add_argument('--ip_threshold', type=int, default=100, help="Packet count threshold per IP to flag as suspicious")
+    parser.add_argument('--ddos_threshold', type=float, default=0.5, help="Threshold for average prediction to flag an IP as malicious")
     parser.add_argument('--model_file', type=str, default="trained_stacking_model.pkl", help="Path to the trained model file")
     parser.add_argument('--scaler_file', type=str, default="trained_scaler.pkl", help="Path to the trained scaler file")
     args = parser.parse_args()
@@ -451,9 +461,9 @@ def main():
             print("[ERROR] In monitor mode, both --interface and --ddos_mode must be specified.")
             sys.exit(1)
         if args.ddos_mode == 'detection':
-            live_ddos_detection(model, args.interface, args.duration, scaler, args.port, args.ip_threshold)
+            live_ddos_detection(model, args.interface, args.duration, scaler, args.port, args.ddos_threshold)
         elif args.ddos_mode == 'prevention':
-            live_ddos_prevention(model, args.interface, args.duration, scaler, args.port, args.ip_threshold)
+            live_ddos_prevention(model, args.interface, args.duration, scaler, args.port, args.ddos_threshold)
     else:
         print("[ERROR] Invalid action specified.")
 

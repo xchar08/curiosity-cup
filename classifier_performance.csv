@@ -1,0 +1,9 @@
+Model,Metric,Score
+Decision Tree,accuracy,0.6955133140566097
+Decision Tree,weighted_f1,0.6743630205519484
+Random Forest,accuracy,0.7403630639724879
+Random Forest,weighted_f1,0.7195532126005857
+Extra Trees,accuracy,0.7299319611499877
+Extra Trees,weighted_f1,0.7207455269263264
+XGBoost,accuracy,0.746071939820122
+XGBoost,weighted_f1,0.7156092595962197

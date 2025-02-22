@@ -167,9 +167,10 @@ def train_pipeline(train_file, test_file):
         # Plotting code removed for faster, unattended training.
         weighted_f1 = f1_score(y_test, y_pred, average='weighted')
         print(f"{name} Weighted F1 Score: {weighted_f1:.4f}\n")
-        return weighted_f1
+        return acc, weighted_f1, cm
     
     model_scores = {}
+    perf_dict = {}  # To store performance for each model
     for name, model in models.items():
         print(f"\n--- Training {name} ---")
         if name == 'XGBoost':
@@ -185,8 +186,10 @@ def train_pipeline(train_file, test_file):
                 model.fit(X_train_xgb, y_train_xgb)
         else:
             model.fit(X_train_res, y_train_res)
-        score = evaluate_model(name, model, X_test_scaled, y_test, le_target, X_train_res, y_train_res)
-        model_scores[name] = score
+        acc, f1_score_model, _ = evaluate_model(name, model, X_test_scaled, y_test, le_target, X_train_res, y_train_res)
+        model_scores[name] = f1_score_model
+        perf_dict[name] = {"accuracy": acc, "weighted_f1": f1_score_model}
+        
     if model_scores:
         best_model_name = max(model_scores, key=model_scores.get)
         best_model_score = model_scores[best_model_name]
@@ -226,6 +229,80 @@ def train_pipeline(train_file, test_file):
     print("[INFO] Trained stacking model saved as 'trained_stacking_model.pkl'.")
     print("[INFO] Trained scaler saved as 'trained_scaler.pkl'.")
     print("[INFO] Trained label encoder saved as 'trained_label_encoder.pkl'.")
+    
+    # --- Export CSV Files for SAS Visualization ---
+    # 1. Export feature distribution for key features from X_train_scaled
+    key_features = ['dur', 'spkts', 'dpkts', 'sbytes', 'dbytes']
+    def export_feature_distribution(df, features, output_file="feature_distribution.csv"):
+        rows = []
+        for feature in features:
+            if feature in df.columns:
+                for val in df[feature]:
+                    rows.append({"feature": feature, "value": val, "plot_type": "value"})
+        pd.DataFrame(rows).to_csv(output_file, index=False)
+        print(f"Exported feature distribution to {output_file}")
+    
+    export_feature_distribution(X_train_scaled, key_features)
+    
+    # 2. Export class distribution: original from y_train and balanced from y_train_res
+    def export_class_distribution(original_series, balanced_series, target_col="attack_cat", output_file="class_distribution.csv"):
+        original = original_series.value_counts().reset_index()
+        original.columns = [target_col, "Count"]
+        original["dataset"] = "original"
+        balanced = pd.Series(balanced_series).value_counts().reset_index()
+        balanced.columns = [target_col, "Count"]
+        balanced["dataset"] = "balanced"
+        pd.concat([original, balanced]).to_csv(output_file, index=False)
+        print(f"Exported class distribution to {output_file}")
+    
+    export_class_distribution(y_train, y_train_res)
+    
+    # 3. Export hyperparameter tuning results from grid_rf.cv_results_
+    def export_hyperparameter_tuning(cv_results, output_file="hyperparameter_tuning.csv"):
+        params = cv_results["params"]
+        mean_test_score = cv_results["mean_test_score"]
+        rows = []
+        for param, score in zip(params, mean_test_score):
+            rows.append({
+                "n_estimators": param.get("n_estimators"),
+                "min_samples_split": param.get("min_samples_split"),
+                "mean_test_score": score
+            })
+        pd.DataFrame(rows).to_csv(output_file, index=False)
+        print(f"Exported hyperparameter tuning results to {output_file}")
+    
+    export_hyperparameter_tuning(grid_rf.cv_results_)
+    
+    # 4. Export classifier performance results
+    def export_classifier_performance(perf_dict, output_file="classifier_performance.csv"):
+        rows = []
+        for model, metrics in perf_dict.items():
+            for metric, score in metrics.items():
+                rows.append({
+                    "Model": model,
+                    "Metric": metric,
+                    "Score": score
+                })
+        pd.DataFrame(rows).to_csv(output_file, index=False)
+        print(f"Exported classifier performance to {output_file}")
+    
+    export_classifier_performance(perf_dict)
+    
+    # 5. Export confusion matrix from stacking classifier
+    def export_confusion_matrix(cm, output_file="confusion_matrix.csv"):
+        rows = []
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                rows.append({
+                    "TrueLabel": i,
+                    "PredLabel": j,
+                    "Count": int(cm[i, j])
+                })
+        pd.DataFrame(rows).to_csv(output_file, index=False)
+        print(f"Exported confusion matrix to {output_file}")
+    
+    export_confusion_matrix(cm_stack)
+    
     return stacking_clf, le_target, scaler
 
 def extract_features(packet):

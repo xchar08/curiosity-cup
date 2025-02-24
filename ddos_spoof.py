@@ -21,3 +21,5 @@ while time.time() - start_time < duration:
     packet_count += 1
 
 print(f"Sent {packet_count} spoofed packets over {duration} seconds.")
+
+# USE AT YOUR OWN RISK

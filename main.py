@@ -233,7 +233,7 @@ def train_pipeline(train_file, test_file):
     # --- Export CSV Files for SAS Visualization ---
     # 1. Export feature distribution for key features from X_train_scaled
     key_features = ['dur', 'spkts', 'dpkts', 'sbytes', 'dbytes']
-    def export_feature_distribution(df, features, output_file="feature_distribution.csv"):
+    def export_feature_distribution(df, features, output_file="figures/feature_distribution.csv"):
         rows = []
         for feature in features:
             if feature in df.columns:
@@ -245,7 +245,7 @@ def train_pipeline(train_file, test_file):
     export_feature_distribution(X_train_scaled, key_features)
     
     # 2. Export class distribution: original from y_train and balanced from y_train_res
-    def export_class_distribution(original_series, balanced_series, target_col="attack_cat", output_file="class_distribution.csv"):
+    def export_class_distribution(original_series, balanced_series, target_col="attack_cat", output_file="figures/class_distribution.csv"):
         original = original_series.value_counts().reset_index()
         original.columns = [target_col, "Count"]
         original["dataset"] = "original"
@@ -258,7 +258,7 @@ def train_pipeline(train_file, test_file):
     export_class_distribution(y_train, y_train_res)
     
     # 3. Export hyperparameter tuning results from grid_rf.cv_results_
-    def export_hyperparameter_tuning(cv_results, output_file="hyperparameter_tuning.csv"):
+    def export_hyperparameter_tuning(cv_results, output_file="figures/hyperparameter_tuning.csv"):
         params = cv_results["params"]
         mean_test_score = cv_results["mean_test_score"]
         rows = []
@@ -274,7 +274,7 @@ def train_pipeline(train_file, test_file):
     export_hyperparameter_tuning(grid_rf.cv_results_)
     
     # 4. Export classifier performance results
-    def export_classifier_performance(perf_dict, output_file="classifier_performance.csv"):
+    def export_classifier_performance(perf_dict, output_file="figures/classifier_performance.csv"):
         rows = []
         for model, metrics in perf_dict.items():
             for metric, score in metrics.items():
@@ -289,7 +289,7 @@ def train_pipeline(train_file, test_file):
     export_classifier_performance(perf_dict)
     
     # 5. Export confusion matrix from stacking classifier
-    def export_confusion_matrix(cm, output_file="confusion_matrix.csv"):
+    def export_confusion_matrix(cm, output_file="figures/confusion_matrix.csv"):
         rows = []
         for i in range(cm.shape[0]):
             for j in range(cm.shape[1]):
@@ -415,8 +415,8 @@ def main():
     parser = argparse.ArgumentParser(description="Network Security ML Pipeline: Train model or monitor live traffic for DDoS")
     parser.add_argument('--action', choices=['train', 'monitor'], default='train',
                         help="Action to perform: 'train' or 'monitor'.")
-    parser.add_argument('--train_file', type=str, default="UNSW_NB15_training-set.csv", help="Training CSV file path")
-    parser.add_argument('--test_file', type=str, default="UNSW_NB15_testing-set.csv", help="Testing CSV file path")
+    parser.add_argument('--train_file', type=str, default="datasets/UNSW_NB15_training-set.csv", help="Training CSV file path")
+    parser.add_argument('--test_file', type=str, default="datasets/UNSW_NB15_testing-set.csv", help="Testing CSV file path")
     parser.add_argument('--ddos_mode', choices=['detection', 'prevention'], help="For monitoring: 'detection' or 'prevention'")
     parser.add_argument('--interface', type=str, help="Network interface for capturing traffic (e.g., eth0 or Wi-Fi)")
     parser.add_argument('--duration', type=int, default=30, help="Capture duration (seconds) for live monitoring")

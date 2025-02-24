@@ -87,7 +87,7 @@ Furthermore, the pipeline exports several CSV files (feature distributions, clas
 To train the model and generate the CSV files for SAS visualization, run:
 
 ```bash
-python main.py --action train --train_file UNSW_NB15_training-set.csv --test_file UNSW_NB15_testing-set.csv
+python main.py --action train --train_file ./datasets/UNSW_NB15_training-set.csv --test_file ./datasets/UNSW_NB15_testing-set.csv
 ```
 
 This command will:
